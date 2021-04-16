@@ -8,12 +8,15 @@ import org.junit.Test;
 
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
 import java.util.function.Supplier;
 
 import static junit.framework.Assert.*;
 
 public class CircuitBreakerRegistryTest {
+
+	private static final int DELAY_MILLS = 100;
 
 	@Test
 	public void testConfig() {
@@ -42,6 +45,7 @@ public class CircuitBreakerRegistryTest {
 		assertEquals(20, breaker.getCircuitBreakerConfig().getFailureRateThreshold(), 0.1);
 	}
 
+
 	@Test
 	public void testCompletableFuture() throws InterruptedException, ExecutionException {
 
@@ -51,28 +55,112 @@ public class CircuitBreakerRegistryTest {
 				.slidingWindowSize(1)
 				.build();
 
+
 		CircuitBreaker circuitBreaker = CircuitBreakerRegistry.of(config).circuitBreaker("");
 
-		System.out.println(getNumberOne(circuitBreaker).get());
-		System.out.println(getNumberOne(circuitBreaker).get());
-		System.out.println(getNumberOne(circuitBreaker).get());
+		System.out.println(protectMethod(circuitBreaker, () -> getNumberOne()).get());
+		System.out.println(protectMethod(circuitBreaker, () -> getNumberOne()).get());
+		System.out.println(protectMethod(circuitBreaker, () -> getNumberOne()).get());
 	}
 
-	private CompletableFuture getNumberOne(CircuitBreaker circuitBreaker) throws InterruptedException {
-		CompletableFuture completableFuture = new CompletableFuture();
-		Supplier<CompletableFuture> supplier = CircuitBreaker.decorateCompletionStage(circuitBreaker, () -> completableFuture);
+	// 调用超时，仍然返回结果
+	@Test
+	public void shouldGetValueWhenSlowCall() throws ExecutionException, InterruptedException {
+		// given
+		CircuitBreakerConfig config = CircuitBreakerConfig.custom()
+				.slowCallDurationThreshold(Duration.ofMillis(10))
+				.build();
+		CircuitBreaker circuitBreaker = CircuitBreakerRegistry.of(config).circuitBreaker("");
 
-		CompletableFuture comFuture = Try.ofSupplier(supplier)
+		// when
+		Integer res = (Integer) protectMethod(circuitBreaker, () -> getNumberOne()).get();
+
+		// then
+		assertEquals(1, res.intValue());
+	}
+
+	// 如果产生异常，从异常处理策略中恢复
+	@Test
+	public void shouldRecoverFromError() throws ExecutionException, InterruptedException {
+		// given
+		CircuitBreaker circuitBreaker = defaultCircuit();
+
+		// when
+		Integer res = (Integer) protectMethod(circuitBreaker, () -> getNumberOneWithError(-1)).get();
+
+		// then
+		assertEquals(-1, res.intValue());
+	}
+
+	// 熔断器打开状态，抛出拒绝调用异常，自行捕获异常处理
+	@Test
+	public void shouldRecoverFromCircuit() throws ExecutionException, InterruptedException {
+		// given
+		CircuitBreaker circuitBreaker = defaultCircuit();
+		circuitBreaker.transitionToForcedOpenState();
+
+		// when
+		Integer result = ((CompletableFuture<Integer>) getTry(circuitBreaker, this::getNumberOne).get())
+				// 处理拒绝调用异常 io.github.resilience4j.circuitbreaker.CallNotPermittedException
+				.exceptionally(e -> 0)
+				.get();
+
+		// then
+		assertEquals(0, result.intValue());
+	}
+
+	private CircuitBreaker defaultCircuit() {
+		return CircuitBreakerRegistry.ofDefaults().circuitBreaker("");
+	}
+
+	private Try<CompletionStage<Integer>> getTry(CircuitBreaker circuitBreaker, Supplier<CompletionStage<Integer>> supplier) {
+		return Try.ofSupplier(CircuitBreaker.decorateCompletionStage(circuitBreaker, supplier));
+	}
+
+
+	private CompletableFuture protectMethod(CircuitBreaker circuitBreaker, Supplier callService) {
+
+		Supplier<CompletableFuture<Integer>> supplier = CircuitBreaker.decorateCompletionStage(circuitBreaker, callService);
+
+		CompletableFuture<Integer> stage = Try.ofSupplier(supplier)
 				.recover(throwable -> {
-					CompletableFuture<Object> future = new CompletableFuture<>();
-					future.completeExceptionally(new RuntimeException());
+					CompletableFuture<Integer> future = new CompletableFuture<>();
+					future.completeExceptionally(new RuntimeException("test"));
 					return future;
 				})
-				.get();
-		Thread.sleep(1000);
-		completableFuture.complete(1);
-		return comFuture;
+				.getOrElseGet(throwable -> CompletableFuture.completedFuture(0));
+
+		return stage;
 	}
 
+	private CompletableFuture getNumberOne() {
+		CompletableFuture completableFuture = new CompletableFuture();
+		// 模拟时间响应请求
+		new Thread(() -> {
+			try {
+				Thread.sleep(DELAY_MILLS);
+			} catch (InterruptedException e) {
+				e.printStackTrace();
+			}
+			completableFuture.complete(1);
+		}).start();
+
+		return completableFuture;
+	}
+
+	private CompletableFuture getNumberOneWithError(int errorValue) {
+		CompletableFuture completableFuture = new CompletableFuture();
+		// 模拟时间响应请求
+		new Thread(() -> {
+			try {
+				Thread.sleep(DELAY_MILLS);
+			} catch (InterruptedException e) {
+				e.printStackTrace();
+			}
+			completableFuture.complete(errorValue);
+		}).start();
+
+		return completableFuture;
+	}
 
 }
