@@ -92,6 +92,20 @@ public class CircuitBreakerRegistryTest {
 		assertEquals(-1, res.intValue());
 	}
 
+	@Test
+	public void shouldWhenNoRecover() throws ExecutionException, InterruptedException {
+		// given
+		CircuitBreaker circuitBreaker = defaultCircuit();
+
+		// when
+		CompletableFuture<Integer> future = (CompletableFuture<Integer>) getTry(circuitBreaker, () -> getNumberOneWithException()).get();
+		Integer res = future.exceptionally(e -> -1).get();
+
+		// then
+		assertEquals(-1, res.intValue());
+	}
+
+
 	// 熔断器打开状态，抛出拒绝调用异常，自行捕获异常处理
 	@Test
 	public void shouldRecoverFromCircuit() throws ExecutionException, InterruptedException {
@@ -158,6 +172,16 @@ public class CircuitBreakerRegistryTest {
 				e.printStackTrace();
 			}
 			completableFuture.complete(errorValue);
+		}).start();
+
+		return completableFuture;
+	}
+
+	private CompletableFuture getNumberOneWithException() {
+		CompletableFuture completableFuture = new CompletableFuture();
+		// 模拟时间响应请求
+		new Thread(() -> {
+			completableFuture.completeExceptionally(new RuntimeException());
 		}).start();
 
 		return completableFuture;
